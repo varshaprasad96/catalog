@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2022 The KCP Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,8 +33,8 @@ import (
 
 func main() {
 	cmd := &cobra.Command{
-		Use:   "kubectl-kcp",
-		Short: "kubectl-kcp",
+		Use:   "kubectl-catalog",
+		Short: "kubectl-catalog",
 		Long: help.Doc(`
 			kcp is a CLI tool to manage Catalog API objects.
 		`),

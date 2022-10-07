@@ -24,9 +24,10 @@ import (
 )
 
 var (
-	// TODO: add other examples related to permission claim commands.
 	bindExampleUses = `
-	// TODO:
+	# binds to the mentioned catalog entry in the command, e.g the below command will create
+ 	# APIBindings referenced in catalog entry "certificates" present in "root:catalog:cert-manager" workspace.
+ 	%[1]s bind catalogentry root:catalog:cert-manager:certificates
 	`
 )
 
@@ -45,22 +46,19 @@ func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 	bindCmd := &cobra.Command{
 		Use:          "catalogentry [<workspace_path:catalogentry-name>]",
 		Short:        "Bind to a Catalog Entry",
-		Example:      fmt.Sprintf(bindExampleUses, "kubectl kcp"),
+		Example:      fmt.Sprintf(bindExampleUses, "kubectl catalog"),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := bindOpts.Complete(args); err != nil {
 				return err
 			}
-
 			if err := bindOpts.Validate(); err != nil {
 				return err
 			}
-
 			return bindOpts.Run(cmd.Context())
 		},
 	}
 	bindOpts.BindFlags(bindCmd)
-
 	cmd.AddCommand(bindCmd)
 	return cmd, nil
 }
