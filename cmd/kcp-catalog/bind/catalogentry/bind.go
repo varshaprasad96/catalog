@@ -34,10 +34,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	"github.com/kcp-dev/kcp/pkg/cliplugins/base"
 	"k8s.io/client-go/rest"
@@ -105,12 +105,6 @@ func (b *BindOptions) Run(ctx context.Context) error {
 	}
 
 	// get the base config, which is needed for creation of clients.
-	baseConfig, err := ctrlcfg.GetConfigWithContext("base")
-	if err != nil {
-		return fmt.Errorf("unable to get base config %v", err)
-	}
-
-	// get the entry referenced in the command to which the user wants to bind.
 	path, entryName := logicalcluster.New(b.CatalogEntryRef).Split()
 	cfg := rest.CopyConfig(config)
 	cfg.Host = baseURL.String()
@@ -119,13 +113,14 @@ func (b *BindOptions) Run(ctx context.Context) error {
 		return err
 	}
 
+	// get the entry referenced in the command to which the user wants to bind.
 	entry := catalogv1alpha1.CatalogEntry{}
 	err = client.Get(ctx, types.NamespacedName{Name: entryName}, &entry)
 	if err != nil {
 		return fmt.Errorf("cannot find the catalog entry %q referenced in the command in the workspace %q", entryName, path)
 	}
 
-	kcpClient, err := newClient(baseConfig, currentClusterName)
+	kcpClient, err := newClient(cfg, currentClusterName)
 	if err != nil {
 		return err
 	}
@@ -144,7 +139,7 @@ func (b *BindOptions) Run(ctx context.Context) error {
 
 		apiBinding := &apisv1alpha1.APIBinding{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: ref.Workspace.ExportName,
+				Name: fmt.Sprintf("%s-%s", ref.Workspace.ExportName, utilrand.String(10)),
 			},
 			Spec: apisv1alpha1.APIBindingSpec{
 				Reference: ref,
