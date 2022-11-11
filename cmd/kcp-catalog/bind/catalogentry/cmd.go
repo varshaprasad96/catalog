@@ -44,7 +44,7 @@ func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 
 	bindOpts := NewBindOptions(streams)
 	bindCmd := &cobra.Command{
-		Use:          "catalogentry [<workspace_path:catalogentry-name>]",
+		Use:          "catalogentry <workspace_path:catalogentry-name>",
 		Short:        "Bind to a Catalog Entry",
 		Example:      fmt.Sprintf(bindExampleUses, "kubectl catalog"),
 		SilenceUsage: true,

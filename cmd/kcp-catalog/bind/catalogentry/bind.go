@@ -33,9 +33,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/client/config"
 
@@ -56,14 +56,15 @@ type BindOptions struct {
 // NewBindOptions returns new BindOptions.
 func NewBindOptions(streams genericclioptions.IOStreams) *BindOptions {
 	return &BindOptions{
-		Options: base.NewOptions(streams),
+		Options:         base.NewOptions(streams),
+		BindWaitTimeout: 30 * time.Second,
 	}
 }
 
 // BindFlags binds fields to cmd's flagset.
 func (b *BindOptions) BindFlags(cmd *cobra.Command) {
 	b.Options.BindFlags(cmd)
-	cmd.Flags().DurationVar(&b.BindWaitTimeout, "timeout", time.Second*30, "Duration to wait for the bindings to be created and bound successfully.")
+	cmd.Flags().DurationVar(&b.BindWaitTimeout, "timeout", b.BindWaitTimeout, "Duration to wait for the bindings to be created and bound successfully.")
 }
 
 // Complete ensures all fields are initialized.
@@ -93,13 +94,12 @@ func (b *BindOptions) Validate() error {
 
 // Run creates an apibinding for the user.
 func (b *BindOptions) Run(ctx context.Context) error {
-	log := klog.FromContext(ctx)
 	config, err := b.ClientConfig.ClientConfig()
 	if err != nil {
 		return err
 	}
 
-	_, currentClusterName, err := pluginhelpers.ParseClusterURL(config.Host)
+	baseURL, currentClusterName, err := pluginhelpers.ParseClusterURL(config.Host)
 	if err != nil {
 		return err
 	}
@@ -112,27 +112,33 @@ func (b *BindOptions) Run(ctx context.Context) error {
 
 	// get the entry referenced in the command to which the user wants to bind.
 	path, entryName := logicalcluster.New(b.CatalogEntryRef).Split()
-	client, err := newCatalogClient(baseConfig, path)
+	cfg := rest.CopyConfig(config)
+	cfg.Host = baseURL.String()
+	client, err := newClient(cfg, path)
 	if err != nil {
 		return err
 	}
 
 	entry := catalogv1alpha1.CatalogEntry{}
-	err = client.Get(context.TODO(), types.NamespacedName{Name: entryName}, &entry)
+	err = client.Get(ctx, types.NamespacedName{Name: entryName}, &entry)
 	if err != nil {
 		return fmt.Errorf("cannot find the catalog entry %q referenced in the command in the workspace %q", entryName, path)
 	}
 
-	kcpclient, err := newKCPClusterClient(baseConfig, currentClusterName)
+	kcpClient, err := newClient(baseConfig, currentClusterName)
 	if err != nil {
 		return err
 	}
+
+	allErrors := []error{}
 
 	apiBindings := []apisv1alpha1.APIBinding{}
 	for _, ref := range entry.Spec.Exports {
 		// check if ref is valid. Skip if invalid by logging error.
 		if ref.Workspace.Path == "" || ref.Workspace.ExportName == "" {
-			log.Info("invalid reference %q/%q", ref.Workspace.Path, ref.Workspace.ExportName)
+			if _, err := fmt.Fprintf(b.Out, "invalid reference %q/%q", ref.Workspace.Path, ref.Workspace.ExportName); err != nil {
+				allErrors = append(allErrors, err)
+			}
 			continue
 		}
 
@@ -150,10 +156,12 @@ func (b *BindOptions) Run(ctx context.Context) error {
 
 	// Create bindings to the target workspace
 	for _, binding := range apiBindings {
-		err := kcpclient.Create(ctx, &binding)
+		err := kcpClient.Create(ctx, &binding)
 		if err != nil {
 			// If an APIBinding already exists, intentionally not updating it since we would not like reset AcceptablePermissionClaims.
-			klog.Infof("Failed to create API binding %s: %w", binding.Name, err)
+			if _, err := fmt.Fprintf(b.Out, "Failed to create API binding %s: %s", binding.Name, err.Error()); err != nil {
+				allErrors = append(allErrors, err)
+			}
 			continue
 		}
 	}
@@ -162,7 +170,7 @@ func (b *BindOptions) Run(ctx context.Context) error {
 		availableBindings := []apisv1alpha1.APIBinding{}
 		for _, binding := range apiBindings {
 			createdBinding := apisv1alpha1.APIBinding{}
-			err = kcpclient.Get(ctx, types.NamespacedName{Name: binding.Name}, &createdBinding)
+			err = kcpClient.Get(ctx, types.NamespacedName{Name: binding.Name}, &createdBinding)
 			if err != nil {
 				return false, err
 			}
@@ -170,13 +178,13 @@ func (b *BindOptions) Run(ctx context.Context) error {
 		}
 		return bindReady(availableBindings), nil
 	}); err != nil {
-		return fmt.Errorf("bindings for catalog entry %s could not be created successfully %v", entryName, err)
+		return fmt.Errorf("bindings for catalog entry %s could not be created successfully: %v", entryName, err)
 	}
 
 	if _, err := fmt.Fprintf(b.Out, "%s created and bound to catalog entry.\n", entryName); err != nil {
-		return err
+		allErrors = append(allErrors, err)
 	}
-	return nil
+	return utilerrors.NewAggregate(allErrors)
 }
 
 func bindReady(bindings []apisv1alpha1.APIBinding) bool {
@@ -188,24 +196,17 @@ func bindReady(bindings []apisv1alpha1.APIBinding) bool {
 	return true
 }
 
-func newKCPClusterClient(cfg *rest.Config, clusterName logicalcluster.Name) (client.Client, error) {
+func newClient(cfg *rest.Config, clusterName logicalcluster.Name) (client.Client, error) {
 	scheme := runtime.NewScheme()
 	err := apisv1alpha1.AddToScheme(scheme)
 	if err != nil {
 		return nil, err
 	}
-	return client.New(kcpclienthelper.SetCluster(rest.CopyConfig(cfg), clusterName), client.Options{
-		Scheme: scheme,
-	})
-}
 
-func newCatalogClient(cfg *rest.Config, clusterName logicalcluster.Name) (client.Client, error) {
-	scheme := runtime.NewScheme()
-	err := catalogv1alpha1.AddToScheme(scheme)
+	err = catalogv1alpha1.AddToScheme(scheme)
 	if err != nil {
 		return nil, err
 	}
-
 	return client.New(kcpclienthelper.SetCluster(rest.CopyConfig(cfg), clusterName), client.Options{
 		Scheme: scheme,
 	})
