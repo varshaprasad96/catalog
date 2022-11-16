@@ -18,6 +18,8 @@ package catalogentry
 
 import (
 	"context"
+	"io"
+	"reflect"
 	"time"
 
 	"errors"
@@ -34,7 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -139,7 +140,7 @@ func (b *BindOptions) Run(ctx context.Context) error {
 
 		apiBinding := &apisv1alpha1.APIBinding{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: fmt.Sprintf("%s-%s", ref.Workspace.ExportName, utilrand.String(10)),
+				GenerateName: ref.Workspace.ExportName + "-",
 			},
 			Spec: apisv1alpha1.APIBindingSpec{
 				Reference: ref,
@@ -151,14 +152,18 @@ func (b *BindOptions) Run(ctx context.Context) error {
 
 	// Create bindings to the target workspace
 	for _, binding := range apiBindings {
-		err := kcpClient.Create(ctx, &binding)
+		found, err := bindingAlreadyExists(ctx, binding, kcpClient, b.Out)
 		if err != nil {
-			// If an APIBinding already exists, intentionally not updating it since we would not like reset AcceptablePermissionClaims.
-			if _, err := fmt.Fprintf(b.Out, "Failed to create API binding %s: %s", binding.Name, err.Error()); err != nil {
+			allErrors = append(allErrors, err)
+		}
+
+		if !found {
+			err := kcpClient.Create(ctx, &binding)
+			if err != nil {
 				allErrors = append(allErrors, err)
 			}
-			continue
 		}
+
 	}
 
 	if err := wait.PollImmediate(time.Millisecond*500, b.BindWaitTimeout, func() (done bool, err error) {
@@ -205,4 +210,40 @@ func newClient(cfg *rest.Config, clusterName logicalcluster.Name) (client.Client
 	return client.New(kcpclienthelper.SetCluster(rest.CopyConfig(cfg), clusterName), client.Options{
 		Scheme: scheme,
 	})
+}
+
+// bindingAlreadyExists lists out the existing bindings in a workspace, checks if the export reference is the same. If so,
+// it further checks the permission claims and updates the existing binding's claims.
+func bindingAlreadyExists(ctx context.Context, expectedBinding apisv1alpha1.APIBinding, kcpclient client.Client, wr io.Writer) (bool, error) {
+	found := false
+	bindingList := apisv1alpha1.APIBindingList{}
+	err := kcpclient.List(ctx, &bindingList)
+	if err != nil {
+		return found, err
+	}
+
+	for _, b := range bindingList.Items {
+		if b.Spec.Reference == expectedBinding.Spec.Reference {
+			found = true
+			// if the specified export reference matches the expected export reference, then check if permission
+			// claims also match.
+			if !reflect.DeepEqual(b.Spec.PermissionClaims, expectedBinding.Spec.PermissionClaims) {
+				// if the permission claims are not equal then update the apibinding
+				b.Spec = expectedBinding.Spec
+				err := kcpclient.Update(ctx, &b)
+				if err != nil {
+					return found, err
+				}
+				if _, err := fmt.Fprintf(wr, "Updating an existing binding %s pointing to the same export reference.\n", b.Name); err != nil {
+					return found, err
+				}
+			}
+
+			// if the permission claims are equal then no action is to be done.
+			if _, err := fmt.Fprintf(wr, "Found an existing APIExport %s pointing to the same export reference.\n", b.Name); err != nil {
+				return found, err
+			}
+		}
+	}
+	return found, nil
 }
