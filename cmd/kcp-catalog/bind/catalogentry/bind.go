@@ -150,9 +150,16 @@ func (b *BindOptions) Run(ctx context.Context) error {
 		apiBindings = append(apiBindings, *apiBinding)
 	}
 
+	// fetch a list of existing binding in the current workspace.
+	existingBindingList := apisv1alpha1.APIBindingList{}
+	err = kcpClient.List(ctx, &existingBindingList)
+	if err != nil {
+		allErrors = append(allErrors, err)
+	}
+
 	// Create bindings to the target workspace
 	for _, binding := range apiBindings {
-		found, err := bindingAlreadyExists(ctx, binding, kcpClient, b.Out)
+		found, err := bindingAlreadyExists(ctx, binding, existingBindingList, kcpClient, b.Out)
 		if err != nil {
 			allErrors = append(allErrors, err)
 		}
@@ -214,15 +221,10 @@ func newClient(cfg *rest.Config, clusterName logicalcluster.Name) (client.Client
 
 // bindingAlreadyExists lists out the existing bindings in a workspace, checks if the export reference is the same. If so,
 // it further checks the permission claims and updates the existing binding's claims.
-func bindingAlreadyExists(ctx context.Context, expectedBinding apisv1alpha1.APIBinding, kcpclient client.Client, wr io.Writer) (bool, error) {
+func bindingAlreadyExists(ctx context.Context, expectedBinding apisv1alpha1.APIBinding, existingBindingList apisv1alpha1.APIBindingList, kcpclient client.Client, wr io.Writer) (bool, error) {
 	found := false
-	bindingList := apisv1alpha1.APIBindingList{}
-	err := kcpclient.List(ctx, &bindingList)
-	if err != nil {
-		return found, err
-	}
 
-	for _, b := range bindingList.Items {
+	for _, b := range existingBindingList.Items {
 		if b.Spec.Reference == expectedBinding.Spec.Reference {
 			found = true
 			// if the specified export reference matches the expected export reference, then check if permission
@@ -230,11 +232,7 @@ func bindingAlreadyExists(ctx context.Context, expectedBinding apisv1alpha1.APIB
 			if !reflect.DeepEqual(b.Spec.PermissionClaims, expectedBinding.Spec.PermissionClaims) {
 				// if the permission claims are not equal then update the apibinding
 				b.Spec = expectedBinding.Spec
-				err := kcpclient.Update(ctx, &b)
-				if err != nil {
-					return found, err
-				}
-				if _, err := fmt.Fprintf(wr, "Updating an existing binding %s pointing to the same export reference.\n", b.Name); err != nil {
+				if _, err := fmt.Fprintf(wr, "Binding for %s already exists, but the permission claims are different. Skipping any action.\n", b.Name); err != nil {
 					return found, err
 				}
 			}
